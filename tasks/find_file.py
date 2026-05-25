@@ -16,26 +16,28 @@ class FindFileTask:
         
         # 1. Intent Parser Layer
         system_prompt = """Extract search parameters for a desktop retrieval system.
-Return a JSON object with:
-- keywords: [str] (filename tokens, avoid generic words)
-- extensions: [str] (e.g. [".pdf", ".docx"])
-- temporal_hint: str|null ("today", "yesterday", "this_week", "older")
-- semantic_intent: str (e.g. "document", "image", "project", "folder")
-- confidence: float (0.0 to 1.0)
-"""
+        Return a JSON object with:
+        - keywords: [str] (nouns or identifying tokens, e.g. "report", "invoice". IGNORE verbs like "worked", "find", "search")
+        - extensions: [str] (e.g. [".pdf", ".xlsx", ".csv", ".docx"])
+        - temporal_hint: str|null ("today", "yesterday", "this_week", "older")
+        - semantic_intent: str ("document", "spreadsheet", "image", "project", "folder")
+        - confidence: float
+        """
         try:
             intent = llm_service.call(system_prompt, query)
             print(f"DEBUG: Parsed Intent: {json.dumps(intent, indent=2)}")
-            
+
             keywords = intent.get("keywords", [])
-            # Manual cleanup of common noise
-            intent_words = {'file', 'folder', 'directory', 'find', 'search', 'my', 'the', 'look'}
-            keywords = [kw for kw in keywords if kw.lower() not in intent_words]
-            
-            if not keywords: return []
+            # Refined noise filter
+            ignore_words = {'file', 'folder', 'directory', 'find', 'search', 'my', 'the', 'look', 'worked', 'on', 'about', 'get'}
+            keywords = [kw for kw in keywords if kw.lower() not in ignore_words]
+
+            # If we have no keywords but have an extension/intent, we should still search!
+            # e.g. "Find the PDF from yesterday" -> keywords: [] is common but solvable.
 
             # 2. Parallel Retrieval
-            results_map = {} # path -> metadata dict
+            results_map = {}
+ # path -> metadata dict
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
                 futures = {
@@ -74,14 +76,24 @@ Return a JSON object with:
             conn.Open("Provider=Search.CollatorDSO;Extended Properties='Application=Windows';")
             
             user_root = os.path.expanduser("~").replace("\\", "/")
-            where_clauses = [f"System.ItemName LIKE '%{kw}%'" for kw in keywords]
-            where_stmt = " AND ".join(where_clauses)
             
-            sql = f"SELECT TOP 30 System.ItemPathDisplay FROM SystemIndex WHERE SCOPE='file:{user_root}' AND ({where_stmt})"
+            # If we have keywords, use them in WHERE. If not, rely on extensions/recency
+            where_parts = []
+            if keywords:
+                kw_stmt = " AND ".join([f"System.ItemName LIKE '%{kw}%'" for kw in keywords])
+                where_parts.append(f"({kw_stmt})")
+            
             if extensions:
                 ext_stmt = " OR ".join([f"System.FileExtension = '{e}'" for e in extensions])
-                sql += f" AND ({ext_stmt})"
+                where_parts.append(f"({ext_stmt})")
+                
+            if not where_parts:
+                return []
+                
+            sql = f"SELECT TOP 50 System.ItemPathDisplay FROM SystemIndex WHERE SCOPE='file:{user_root}' AND " + " AND ".join(where_parts)
+            sql += " ORDER BY System.DateModified DESC"
             
+            print(f"DEBUG: Index Query: {sql}")
             rs.Open(sql, conn)
             while not rs.EOF:
                 path = rs.Fields.Item("System.ItemPathDisplay").Value
@@ -94,14 +106,10 @@ Return a JSON object with:
         return paths
 
     def _retrieve_active_context(self, keywords) -> list:
+        # If no keywords, just return recent items in context roots
         paths = []
-        context_roots = [
-            os.path.expanduser("~\\Desktop"),
-            os.getcwd(),
-            os.path.dirname(os.getcwd())
-        ]
+        context_roots = [os.path.expanduser("~\\Desktop"), os.getcwd(), os.path.dirname(os.getcwd())]
         
-        # Add open explorer windows
         pythoncom.CoInitialize()
         try:
             windows = get_open_explorer_windows()
@@ -115,13 +123,15 @@ Return a JSON object with:
             try:
                 for root, dirs, files in os.walk(base):
                     depth = root[len(base):].count(os.sep)
-                    if depth > 1: # Shallow for speed
+                    if depth > 1:
                         dirs[:] = []
                         continue
                     dirs[:] = [d for d in dirs if d not in self.blacklist]
                     
                     for item in files + dirs:
-                        if any(kw.lower() in item.lower() for kw in keywords):
+                        if not keywords: # Match everything in active context if no keywords
+                            paths.append(os.path.join(root, item))
+                        elif any(kw.lower() in item.lower() for kw in keywords):
                             paths.append(os.path.join(root, item))
             except Exception: pass
         return paths
@@ -143,32 +153,50 @@ Return a JSON object with:
     def _rank_results(self, results_map: dict, keywords: list, intent: dict) -> list:
         scored = []
         
+        # Extended blacklist for the ranking phase (ignore library/system garbage)
+        RANK_BLACKLIST = {'venv', '.venv', 'env', 'site-packages', 'node_modules', 'AppData', '__pycache__', '.git'}
+        
         for path, meta in results_map.items():
-            name = os.path.basename(path)
+            name = os.path.basename(path).lower()
+            path_lower = path.lower()
             score = 0.0
             
-            # 1. Filename Similarity (35%)
-            match_count = sum(1 for kw in keywords if kw.lower() in name.lower())
-            score += (match_count / len(keywords)) * 0.35
+            # 0. CRITICAL: Penalty for "Garbage" paths
+            if any(f"\\{b}\\" in path_lower or f"/{b}/" in path_lower for b in RANK_BLACKLIST):
+                score -= 5.0 # Heavy penalty
+            
+            # 1. Filename Similarity (Strong weight)
+            # Check for exact matches first
+            if any(kw.lower() == name or kw.lower() == os.path.splitext(name)[0] for kw in keywords):
+                score += 1.5 # Massive boost for exact filename match
+            
+            match_count = sum(1 for kw in keywords if kw.lower() in name)
+            score += (match_count / len(keywords)) * 0.5
             
             # 2. Strategy Weighting
-            if "recent" in meta["strategies"]: score += 0.20 # Recency bias
-            if "context" in meta["strategies"]: score += 0.15 # Proximity bias
+            if "recent" in meta["strategies"]: score += 0.3
+            if "context" in meta["strategies"]: score += 0.2
             
-            # 3. Extension Match (15%)
+            # 3. Path Relevance
+            # Prioritize Desktop and Documents
+            if "desktop" in path_lower or "documents" in path_lower:
+                score += 0.4
+            
+            # 4. Extension Match
             if intent.get("extensions"):
-                if any(path.lower().endswith(e.lower()) for e in intent["extensions"]):
-                    score += 0.15
+                if any(path_lower.endswith(e.lower()) for e in intent["extensions"]):
+                    score += 0.3
             
-            # 4. Multi-Strategy Bonus
-            if len(meta["strategies"]) > 1:
-                score += 0.10 # Confidence boost
-                
             scored.append((path, score))
         
         # Sort by score descending
         scored.sort(key=lambda x: x[1], reverse=True)
-        return [x[0] for x in scored]
+        
+        # Debug trace for the top match
+        if scored:
+            print(f"DEBUG: Top result: {scored[0][0]} (Score: {scored[0][1]:.2f})")
+            
+        return [x[0] for x in scored if x[1] > -1.0] # Only return non-penalized items
 
     def run(self, query: str):
         results = self.search_programmatic(query)

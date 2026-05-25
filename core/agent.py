@@ -4,18 +4,23 @@ from backend.core.llm import llm_service
 class Agent:
     def think(self, user_query: str, context: dict) -> dict:
         system_prompt = """You are CursorOS, a Windows desktop AI overlay agent.
-Your goal is to decide the best action to take based on the user's query and the current OS context.
+Your goal is to decide a sequence of actions (a chain) to fulfill the user's request.
 
 AVAILABLE ACTIONS:
-1. organise_folder: Params: {{ "path": str }}. Use this if the user wants to organize files in a directory.
-2. find_file: Params: {{ "description": str }}. Use this if the user is looking for a specific file.
-3. change_cursor: Params: {{ "description": str }}. Use this if the user wants to change their mouse cursor.
-4. clarify: Params: {{ "question": str }}. Use this if the user's intent is unclear or if more information is needed.
+1. find_file: Params: {{ "description": str }}. Finds a file/folder path. REQUIRED if you don't have a path yet.
+2. organise_folder: Params: {{ "path": str }}. Organizes a folder.
+3. open_path: Params: {{ "path": str }}. Opens a file or folder.
+4. change_cursor: Params: {{ "description": str }}.
+5. clarify: Params: {{ "question": str }}.
+
+CHAINING LOGIC:
+- You must return an object with an "actions" key, which is a LIST of action objects.
+- If the user wants to do something to a file they haven't specified a path for, use 'find_file' first.
+- Example: "find my resume and open it" -> actions: [{"action": "find_file", ...}, {"action": "open_path", ...}]
 
 CONSTRAINTS:
-- You must ONLY return a JSON object with the following keys: "action", "params", "explanation".
-- Choose exactly one action.
-- The explanation should be a brief sentence for the user.
+- ONLY return a JSON object with: { "actions": [ { "action", "params", "explanation" } ] }.
+- If 'find_file' is part of a chain, leave the "path" param of subsequent actions as null; it will be filled automatically.
 
 CONTEXT:
 Open Explorer Windows: {explorer_windows}
@@ -27,7 +32,9 @@ Open Explorer Windows: {explorer_windows}
             return llm_service.call(formatted_system_prompt, f"User Query: {user_query}")
         except Exception as e:
             return {
-                "action": "clarify",
-                "params": {"question": f"Error: {str(e)}"},
-                "explanation": "I encountered an error while thinking."
+                "actions": [{
+                    "action": "clarify",
+                    "params": {"question": f"Error: {str(e)}"},
+                    "explanation": "I encountered an error while thinking."
+                }]
             }

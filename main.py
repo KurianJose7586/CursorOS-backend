@@ -18,70 +18,93 @@ def main():
     agent = Agent()
     overlay = None
     
+    def on_select(path):
+        print(f"Opening: {path}")
+        try:
+            os.startfile(path)
+            overlay.root.after(0, overlay.hide)
+        except Exception as e:
+            print(f"Error opening file: {e}")
+
     def on_submit(text):
         print(f"User query: {text}")
         
-        def process_task():
-            # Initialize COM for this thread
+        # 0. UI Setup for Planning
+        overlay.root.after(0, lambda: overlay.add_task_step("plan", "Agentic Planning"))
+
+        def process_chain():
             pythoncom.CoInitialize()
             try:
-                # 1. Gather Context
-                context = {
-                    "explorer_windows": get_open_explorer_windows()
-                }
-                
-                # 2. Think
-                print("Agent is thinking...")
+                # 1. Gather Context & Plan
+                overlay.root.after(0, lambda: overlay.update_task_status("plan", "in-progress"))
+                context = {"explorer_windows": get_open_explorer_windows()}
                 plan = agent.think(text, context)
-                print(f"Plan: {plan}")
+                actions = plan.get("actions", [])
+                overlay.root.after(0, lambda: overlay.update_task_status("plan", "completed"))
                 
-                action = plan.get("action")
-                params = plan.get("params", {})
-                explanation = plan.get("explanation", "Executing your request.")
+                last_result_path = None
                 
-                # 3. Execute Task
-                if action == "organise_folder":
-                    path = params.get("path")
-                    if path:
-                        task = OrganiseFolderTask()
-                        log, msg = task.run(path)
-                        action_log.add_entry("organise_folder", "executed", {"path": path, "log": log})
-                        print(msg)
-                    else:
-                        print("No path provided for organisation.")
-                        
-                elif action == "find_file":
-                    desc = params.get("description")
-                    if desc:
-                        task = FindFileTask()
-                        results, msg = task.run(desc)
-                        action_log.add_entry("find_file", "executed", {"description": desc, "results": results})
-                        print(msg)
-                        if results:
-                            print("Matches found:")
-                            for r in results:
-                                print(f" - {r}")
-                            
-                elif action == "change_cursor":
-                    desc = params.get("description")
-                    if desc:
-                        task = ChangeCursorTask()
-                        success, msg = task.run(desc)
-                        action_log.add_entry("change_cursor", "executed", {"description": desc, "success": success})
-                        print(msg)
-                        
-                elif action == "clarify":
-                    question = params.get("question", "Could you please clarify?")
-                    print(f"Agent asks: {question}")
+                # 2. Sequential Execution
+                for i, action_item in enumerate(actions):
+                    action = action_item.get("action")
+                    params = action_item.get("params", {})
+                    explanation = action_item.get("explanation", "Executing...")
                     
+                    # Add dynamic UI step
+                    task_id = f"task_{i}"
+                    overlay.root.after(0, lambda d=explanation: overlay.add_task_step(task_id, d))
+                    overlay.root.after(0, lambda: overlay.update_task_status(task_id, "in-progress"))
+                    
+                    try:
+                        if action == "find_file":
+                            desc = params.get("description")
+                            task = FindFileTask()
+                            results, msg = task.run(desc)
+                            if results:
+                                last_result_path = results[0] # Take the top match for the chain
+                                # If it's the LAST action, show results in UI
+                                if i == len(actions) - 1:
+                                    overlay.root.after(0, lambda r=results: overlay.display_results(r))
+                            else:
+                                raise Exception(f"Could not find '{desc}'")
+                                
+                        elif action == "organise_folder":
+                            # Use path from params or from previous find_file
+                            path = params.get("path") or last_result_path
+                            if not path: raise Exception("No path provided for organization.")
+                            task = OrganiseFolderTask()
+                            log, msg = task.run(path)
+                            action_log.add_entry("organise_folder", "executed", {"path": path, "log": log})
+                            
+                        elif action == "open_path":
+                            path = params.get("path") or last_result_path
+                            if not path: raise Exception("No path provided to open.")
+                            on_select(path) # Re-use the existing launch logic
+                            
+                        elif action == "change_cursor":
+                            desc = params.get("description")
+                            task = ChangeCursorTask()
+                            task.run(desc)
+                            
+                        overlay.root.after(0, lambda: overlay.update_task_status(task_id, "completed"))
+                        
+                    except Exception as e:
+                        print(f"Action '{action}' failed: {e}")
+                        overlay.root.after(0, lambda: overlay.update_task_status(task_id, "failed"))
+                        break # Stop the chain on failure
+
+                # Auto-hide after short delay if not displaying results
+                if actions and actions[-1].get("action") != "find_file":
+                    time.sleep(2)
+                    overlay.root.after(0, overlay.hide)
+
             except Exception as e:
-                print(f"Error in background task: {e}")
+                print(f"Error in chain: {e}")
+                overlay.root.after(0, lambda: overlay.update_task_status("plan", "failed"))
             finally:
-                # Clean up COM
                 pythoncom.CoUninitialize()
 
-        # Start processing in a background thread
-        threading.Thread(target=process_task, daemon=True).start()
+        threading.Thread(target=process_chain, daemon=True).start()
 
     def trigger_overlay():
         nonlocal overlay
@@ -90,7 +113,8 @@ def main():
             overlay.root.after(0, overlay.show)
         else:
             print("Overlay not initialized yet.")
-
+    
+    # ... rest of main initialization ...
     activation_mgr = ActivationManager(on_activate_callback=trigger_overlay)
     activation_mgr.register_hotkey()
     
@@ -100,7 +124,7 @@ def main():
         
     start_tray_thread(on_activate=trigger_overlay, on_quit=quit_callback)
     
-    overlay = OverlayWindow(on_submit=on_submit)
+    overlay = OverlayWindow(on_submit=on_submit, on_select=on_select)
     
     print("CursorOS is running. Press Ctrl+Shift+Space to activate.")
     overlay.run()

@@ -1,0 +1,9 @@
+pywin32
+pystray
+Pillow
+google-generativeai
+groq
+pytest
+python-dotenv
+keyboard
+requests

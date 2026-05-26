@@ -55,10 +55,23 @@ class LLMService:
         raise ConnectionError("All LLM providers failed.")
 
     def _parse_json(self, text: str) -> dict:
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "{" in text:
-            text = text[text.find("{"):text.rfind("}")+1]
-        return json.loads(text)
+        try:
+            # Clean up the text
+            text = text.strip()
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "{" in text:
+                text = text[text.find("{"):text.rfind("}")+1]
+            
+            data = json.loads(text)
+            
+            # If the LLM returned a list directly, wrap it in our expected format
+            if isinstance(data, list):
+                return {"actions": data}
+            
+            return data
+        except Exception as e:
+            print(f"JSON Parsing Error: {e}\nRaw Text: {text}")
+            raise e
 
 llm_service = LLMService()

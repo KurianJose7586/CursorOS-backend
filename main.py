@@ -1,4 +1,5 @@
 import sys
+import os
 import time
 import threading
 import pythoncom
@@ -36,7 +37,8 @@ def main():
         """Triggered when user clicks 'Execute Plan' in Plan Mode."""
         print("User confirmed plan. Executing...")
         overlay.action_bar.pack_forget() # Hide the button
-        threading.Thread(target=execute_action_chain, args=(current_chain_data["actions"],), daemon=True).start()
+        user_text = overlay.entry.get()
+        threading.Thread(target=execute_action_chain, args=(current_chain_data["actions"], user_text), daemon=True).start()
 
     def on_submit(text):
         print(f"User query ({overlay.mode.get()} mode): {text}")
@@ -61,7 +63,7 @@ def main():
                     overlay.root.after(0, overlay.show_plan_ready)
                 else:
                     # In Auto Mode, execute immediately
-                    execute_action_chain(actions)
+                    execute_action_chain(actions, text)
 
             except Exception as e:
                 print(f"Planning Error: {e}")
@@ -71,7 +73,7 @@ def main():
 
         threading.Thread(target=process_planning, daemon=True).start()
 
-    def execute_action_chain(actions):
+    def execute_action_chain(actions, user_text):
         pythoncom.CoInitialize()
         try:
             last_result_path = None
@@ -86,15 +88,17 @@ def main():
                 
                 try:
                     if action == "find_file":
-                        desc = params.get("description")
+                        # Use description from AI or fallback to user query
+                        search_desc = params.get("description") or user_text
                         task = FindFileTask()
-                        results, msg = task.run(desc)
+                        results, msg = task.run(search_desc)
+
                         if results:
                             last_result_path = results[0]
                             if i == len(actions) - 1:
                                 overlay.root.after(0, lambda r=results: overlay.display_results(r))
                         else:
-                            raise Exception(f"Could not find '{desc}'")
+                            raise Exception(f"Could not find '{search_desc}'")
                             
                     elif action == "organise_folder":
                         path = params.get("path") or last_result_path
@@ -106,6 +110,13 @@ def main():
                         path = params.get("path") or last_result_path
                         if not path: raise Exception("No path provided.")
                         on_select(path)
+
+                    elif action == "copy_path":
+                        path = params.get("path") or last_result_path
+                        if not path: raise Exception("No path provided.")
+                        overlay.root.clipboard_clear()
+                        overlay.root.clipboard_append(path)
+                        overlay.root.after(0, lambda: overlay.display_message(f"Copied to clipboard: {path}"))
                         
                     elif action == "chat":
                         message = params.get("message", "...")
@@ -118,17 +129,12 @@ def main():
                     overlay.root.after(0, lambda: overlay.update_task_status(task_id, "failed"))
                     break
 
-            # Auto-hide logic: Only hide if the LAST action was a 'silent' system task.
-            # If it was 'find_file' or 'chat', we MUST stay open for user interaction.
+            # Auto-hide logic
             last_action_type = actions[-1].get("action") if actions else None
-            
             if last_action_type in ["organise_folder", "change_cursor", "open_path"]:
-                print("DEBUG: Finalizing silent task. Auto-hiding in 2s...")
                 time.sleep(1.5)
                 overlay.root.after(0, overlay.hide)
             else:
-                print("DEBUG: Task complete. Staying open for user interaction.")
-                # Ensure UI is updated one last time to be sure it's responsive
                 overlay.root.after(0, lambda: overlay.entry.config(state='normal'))
         finally:
             pythoncom.CoUninitialize()

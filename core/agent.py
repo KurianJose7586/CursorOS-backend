@@ -15,15 +15,13 @@ AVAILABLE ACTIONS:
 2. organise_folder: Groups files into subfolders. Params: {{ "path": str }}.
 3. open_path: Launches a file/folder. Params: {{ "path": str }}.
 4. chat: Talks to the user. Params: {{ "message": str }}. Use for greetings/questions.
-5. change_cursor: Changes mouse icon. Params: {{ "description": str }}.
-6. clarify: Asks for more info. Params: {{ "question": str }}.
+5. copy_path: Copies a file/folder path to clipboard. Params: {{ "path": str }}.
+6. change_cursor: Changes mouse icon. Params: {{ "description": str }}.
+7. clarify: Asks for more info. Params: {{ "question": str }}.
 
 EXAMPLES:
-- User: "hello"
-  Response: {{ "actions": [ {{ "action": "chat", "params": {{ "message": "Hello! I am CursorOS. How can I help you manage your files today?" }}, "explanation": "Greeting the user." }} ] }}
-
-- User: "find my resume and open it"
-  Response: {{ "actions": [ {{ "action": "find_file", "params": {{ "description": "resume" }}, "explanation": "Locating your resume file." }}, {{ "action": "open_path", "params": {{ "path": null }}, "explanation": "Opening the found file." }} ] }}
+- User: "find my resume and copy the path"
+  Response: {{ "actions": [ {{ "action": "find_file", "params": {{ "description": "resume" }}, "explanation": "Locating your resume file." }}, {{ "action": "copy_path", "params": {{ "path": null }}, "explanation": "Copying path to clipboard." }} ] }}
 
 CONTEXT:
 Open Explorer Windows: {explorer_windows}

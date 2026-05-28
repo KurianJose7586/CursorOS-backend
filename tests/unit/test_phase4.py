@@ -15,9 +15,10 @@ def test_agent_think_success(mock_llm_call):
     context = {"explorer_windows": [{"title": "Downloads", "path": "C:\\Downloads"}]}
     result = agent.think("organize my downloads", context)
     
-    assert result["action"] == "organise_folder"
-    assert result["params"]["path"] == "C:\\Downloads"
-    assert "explanation" in result
+    assert "actions" in result
+    assert result["actions"][0]["action"] == "organise_folder"
+    assert result["actions"][0]["params"]["path"] == "C:\\Downloads"
+    assert "explanation" in result["actions"][0]
 
 @patch('backend.core.llm.llm_service.call')
 def test_agent_think_error_fallback(mock_llm_call):
@@ -26,5 +27,6 @@ def test_agent_think_error_fallback(mock_llm_call):
     agent = Agent()
     result = agent.think("do something", {})
     
-    assert result["action"] == "clarify"
-    assert "error" in result["params"]["question"].lower()
+    assert "actions" in result
+    assert result["actions"][0]["action"] == "chat"
+    assert "snag" in result["actions"][0]["params"]["message"].lower()

@@ -12,38 +12,52 @@ class FindFileTask:
         self.blacklist = {'node_modules', '.git', '.venv', 'venv', 'env', '__pycache__', 'AppData'}
 
     def search_programmatic(self, query: str) -> list:
-        print(f"DEBUG: Initializing Intent Parser 2.0 for: '{query}'")
+        print(f"DEBUG: Initializing Intent Parser 2.0 + Tier 1 Expansion for: '{query}'")
         
-        # 1. Intent Parser Layer
+        # 1. Intent Parser Layer + Query Expansion
+        # We ask for intent and synonyms in one fast call
         system_prompt = """Extract search parameters for a desktop retrieval system.
         Return a JSON object with:
-        - keywords: [str] (nouns or identifying tokens, e.g. "report", "invoice". IGNORE verbs like "worked", "find", "search")
-        - extensions: [str] (e.g. [".pdf", ".xlsx", ".csv", ".docx"])
-        - temporal_hint: str|null ("today", "yesterday", "this_week", "older")
-        - semantic_intent: str ("document", "spreadsheet", "image", "project", "folder")
+        - keywords: [str] (nouns or identifying tokens)
+        - synonyms: [str] (conceptual synonyms, e.g. "datesheet" -> ["timetable", "schedule", "exam"])
+        - extensions: [str]
+        - temporal_hint: str|null (e.g. "this week", "last month", "2023")
+        - semantic_intent: str
+        - weights: {
+        "recency": float (0.0 to 1.0, higher if user mentions time or "recent"),
+        "proximity": float (0.0 to 1.0, higher if user mentions "here" or "this folder"),
+        "name_match": float (0.0 to 1.0, base priority for filename similarity)
+        }
         - confidence: float
         """
         try:
             intent = llm_service.call(system_prompt, query)
             print(f"DEBUG: Parsed Intent: {json.dumps(intent, indent=2)}")
 
-            keywords = intent.get("keywords", [])
+            base_keywords = intent.get("keywords", [])
+            synonyms = intent.get("synonyms", [])
+            
             # Refined noise filter
             ignore_words = {'file', 'folder', 'directory', 'find', 'search', 'my', 'the', 'look', 'worked', 'on', 'about', 'get'}
-            keywords = [kw for kw in keywords if kw.lower() not in ignore_words]
+            base_keywords = [kw for kw in base_keywords if kw.lower() not in ignore_words]
+            
+            # Expanded search set
+            all_search_terms = list(set(base_keywords + synonyms))
+            
+            if not all_search_terms:
+                # Fallback: if user just said a word, use it as a keyword
+                all_search_terms = [query.split()[-1]]
 
-            # If we have no keywords but have an extension/intent, we should still search!
-            # e.g. "Find the PDF from yesterday" -> keywords: [] is common but solvable.
+            print(f"DEBUG: Expanded Search Terms: {all_search_terms}")
 
-            # 2. Parallel Retrieval
+            # 2. Parallel Retrieval (Updated to use all_search_terms)
             results_map = {}
- # path -> metadata dict
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
                 futures = {
-                    executor.submit(self._retrieve_windows_index, keywords, intent.get("extensions")): "index",
-                    executor.submit(self._retrieve_active_context, keywords): "context",
-                    executor.submit(self._retrieve_recent_items, keywords): "recent"
+                    executor.submit(self._retrieve_windows_index, all_search_terms, intent.get("extensions")): "index",
+                    executor.submit(self._retrieve_active_context, all_search_terms): "context",
+                    executor.submit(self._retrieve_recent_items, all_search_terms): "recent"
                 }
 
                 for future in concurrent.futures.as_completed(futures):
@@ -58,7 +72,7 @@ class FindFileTask:
                         print(f"DEBUG: Strategy {strategy} failed: {e}")
 
             # 3. Ranking Layer
-            ranked_results = self._rank_results(results_map, keywords, intent)
+            ranked_results = self._rank_results(results_map, all_search_terms, intent)
             
             print(f"DEBUG: Parallel Search complete. Found {len(ranked_results)} unique items.")
             return ranked_results[:10]
@@ -153,50 +167,102 @@ class FindFileTask:
     def _rank_results(self, results_map: dict, keywords: list, intent: dict) -> list:
         scored = []
         
-        # Extended blacklist for the ranking phase (ignore library/system garbage)
+        # Extended blacklist for the ranking phase
         RANK_BLACKLIST = {'venv', '.venv', 'env', 'site-packages', 'node_modules', 'AppData', '__pycache__', '.git'}
         
+        # Provenance Signals Setup
+        username = os.getlogin().lower()
+        now = datetime.now()
+        
+        # Extract weights with defaults
+        weights = intent.get("weights", {})
+        w_recency = weights.get("recency", 0.5)
+        w_proximity = weights.get("proximity", 0.4)
+        w_name = weights.get("name_match", 1.0)
+        
+        # Get active paths from context
+        active_paths = []
+        try:
+            from backend.core.os_context import get_open_explorer_windows
+            active_paths = [w.get("path") for w in get_open_explorer_windows() if w.get("path")]
+        except: pass
+
         for path, meta in results_map.items():
             name = os.path.basename(path).lower()
             path_lower = path.lower()
             score = 0.0
-            
+            trace = {}
+
             # 0. CRITICAL: Penalty for "Garbage" paths
             if any(f"\\{b}\\" in path_lower or f"/{b}/" in path_lower for b in RANK_BLACKLIST):
-                score -= 5.0 # Heavy penalty
+                score -= 5.0 
             
-            # 1. Filename Similarity (Strong weight)
-            # Check for exact matches first
+            # 1. Filename Similarity (Weighted by w_name)
+            name_score = 0.0
             if any(kw.lower() == name or kw.lower() == os.path.splitext(name)[0] for kw in keywords):
-                score += 1.5 # Massive boost for exact filename match
+                name_score += 2.0 # Direct match
+            elif any(name.startswith(kw.lower()) for kw in keywords):
+                name_score += 1.0 # Prefix match
             
             match_count = sum(1 for kw in keywords if kw.lower() in name)
-            score += (match_count / len(keywords)) * 0.5
+            name_score += (match_count / max(1, len(keywords))) * 0.5
             
-            # 2. Strategy Weighting
-            if "recent" in meta["strategies"]: score += 0.3
-            if "context" in meta["strategies"]: score += 0.2
+            total_name_score = name_score * w_name
+            score += total_name_score
+            trace["name_score"] = round(total_name_score, 2)
+
+            # 2. Personalization & Context Signals
+            p_score = 0.0
             
-            # 3. Path Relevance
-            # Prioritize Desktop and Documents
-            if "desktop" in path_lower or "documents" in path_lower:
-                score += 0.4
+            # Ownership: User's name in path
+            if username in path_lower:
+                p_score += 0.40
             
-            # 4. Extension Match
+            # Recency: Temporal decay weighted by w_recency
+            try:
+                mtime = datetime.fromtimestamp(os.path.getmtime(path))
+                days_old = (now - mtime).days
+                
+                # Boost if it matches temporal hint (e.g. "this week")
+                hint = (intent.get("temporal_hint") or "").lower()
+                recency_boost = 1.0
+                if "week" in hint and days_old <= 7: recency_boost = 2.0
+                elif "month" in hint and days_old <= 30: recency_boost = 1.5
+                elif "year" in hint and days_old <= 365: recency_boost = 1.2
+                
+                # Exponential decay: more aggressive than linear
+                decay = 0.5 ** (days_old / 30) # Half-life of 30 days
+                p_score += (decay * w_recency * recency_boost)
+            except: pass
+            
+            # Proximity: Weighted by w_proximity
+            for ap in active_paths:
+                if path_lower.startswith(ap.lower()):
+                    p_score += (0.5 * w_proximity)
+                    break
+            
+            score += p_score
+            trace["p_score"] = round(p_score, 2)
+
+            # 3. Extension Match
             if intent.get("extensions"):
                 if any(path_lower.endswith(e.lower()) for e in intent["extensions"]):
-                    score += 0.3
+                    score += 0.5
             
-            scored.append((path, score))
+            scored.append({
+                "path": path, 
+                "score": score, 
+                "trace": trace
+            })
         
-        # Sort by score descending
-        scored.sort(key=lambda x: x[1], reverse=True)
+        scored.sort(key=lambda x: x["score"], reverse=True)
         
-        # Debug trace for the top match
         if scored:
-            print(f"DEBUG: Top result: {scored[0][0]} (Score: {scored[0][1]:.2f})")
+            top = scored[0]
+            print(f"DEBUG: Top Match: {top['path']} (Score: {top['score']:.2f})")
+            print(f"DEBUG: Trace: {json.dumps(top['trace'])}")
             
-        return [x[0] for x in scored if x[1] > -1.0] # Only return non-penalized items
+        return [x["path"] for x in scored if x["score"] > -1.0]
 
     def run(self, query: str):
         results = self.search_programmatic(query)

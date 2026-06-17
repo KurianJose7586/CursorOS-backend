@@ -18,10 +18,12 @@ AVAILABLE ACTIONS:
 5. copy_path: Copies a file/folder path to clipboard. Params: {{ "path": str }}.
 6. change_cursor: Changes mouse icon. Params: {{ "description": str }}.
 7. clarify: Asks for more info. Params: {{ "question": str }}.
+8. peek_file: Reads the content of a text-based file. Params: {{ "path": str }}. Use when the user asks what's inside a file or for a summary.
 
 EXAMPLES:
-- User: "find my resume and copy the path"
-  Response: {{ "actions": [ {{ "action": "find_file", "params": {{ "description": "resume" }}, "explanation": "Locating your resume file." }}, {{ "action": "copy_path", "params": {{ "path": null }}, "explanation": "Copying path to clipboard." }} ] }}
+- User: "what's in my resume?"
+  Response: {{ "actions": [ {{ "action": "find_file", "params": {{ "description": "resume" }}, "explanation": "Finding your resume." }}, {{ "action": "peek_file", "params": {{ "path": null }}, "explanation": "Reading content to answer your question." }} ] }}
+
 
 CONTEXT:
 Open Explorer Windows: {explorer_windows}

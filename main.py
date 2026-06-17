@@ -7,7 +7,8 @@ from backend.core.activation import ActivationManager
 from backend.core.tray import start_tray_thread
 from frontend.overlay.window import OverlayWindow
 from backend.core.agent import Agent
-from backend.core.os_context import get_open_explorer_windows
+from backend.core.os_context import get_open_explorer_windows, read_file_content
+from backend.core.llm import llm_service
 from backend.tasks.organise_folder import OrganiseFolderTask
 from backend.tasks.find_file import FindFileTask
 from backend.tasks.change_cursor import ChangeCursorTask
@@ -95,16 +96,41 @@ def main():
 
                         if results:
                             last_result_path = results[0]
-                            if i == len(actions) - 1:
-                                overlay.root.after(0, lambda r=results: overlay.display_results(r))
+                            # Always show results if found, so user sees what happened
+                            overlay.root.after(0, lambda r=results: overlay.display_results(r))
                         else:
                             raise Exception(f"Could not find '{search_desc}'")
                             
                     elif action == "organise_folder":
                         path = params.get("path") or last_result_path
                         if not path: raise Exception("No path provided.")
+                        
                         task = OrganiseFolderTask()
-                        task.run(path)
+                        overlay.root.after(0, lambda: overlay.add_task_step(task_id, "Scanning folder..."))
+                        proposal, err = task.propose(path)
+                        
+                        if err: raise Exception(err)
+                        
+                        # Wait for user confirmation in UI
+                        confirm_event = threading.Event()
+                        final_proposal = []
+
+                        def on_user_confirm(proposal_result):
+                            nonlocal final_proposal
+                            final_proposal = proposal_result
+                            confirm_event.set()
+
+                        overlay.root.after(0, lambda: overlay.display_org_preview(proposal, on_user_confirm))
+                        overlay.root.after(0, lambda: overlay.update_task_status(task_id, "pending approval"))
+                        
+                        # Block the background thread until user clicks confirm
+                        confirm_event.wait()
+                        
+                        overlay.root.after(0, lambda: overlay.update_task_status(task_id, "in-progress"))
+                        overlay.root.after(0, lambda: overlay.display_message("Executing organization..."))
+                        
+                        results, msg = task.execute(path, final_proposal)
+                        overlay.root.after(0, lambda m=msg: overlay.display_message(m))
                         
                     elif action == "open_path":
                         path = params.get("path") or last_result_path
@@ -117,6 +143,20 @@ def main():
                         overlay.root.clipboard_clear()
                         overlay.root.clipboard_append(path)
                         overlay.root.after(0, lambda: overlay.display_message(f"Copied to clipboard: {path}"))
+
+                    elif action == "peek_file":
+                        path = params.get("path") or last_result_path
+                        if not path: raise Exception("No path provided.")
+                        
+                        content, err = read_file_content(path)
+                        if err: raise Exception(err)
+                        
+                        overlay.root.after(0, lambda: overlay.add_task_step(task_id, "Analyzing content..."))
+                        
+                        prompt = f"The user asked: '{user_text}'\n\nHere is the beginning of the file '{os.path.basename(path)}':\n\n{content}\n\nBased on this content, provide a concise answer or summary."
+                        response = llm_service.call("You are a helpful desktop assistant.", prompt)
+                        
+                        overlay.root.after(0, lambda m=response: overlay.display_message(m))
                         
                     elif action == "chat":
                         message = params.get("message", "...")
@@ -132,7 +172,7 @@ def main():
             # Auto-hide logic
             last_action_type = actions[-1].get("action") if actions else None
             if last_action_type in ["organise_folder", "change_cursor", "open_path"]:
-                time.sleep(1.5)
+                time.sleep(2.5) # Increased for better visibility
                 overlay.root.after(0, overlay.hide)
             else:
                 overlay.root.after(0, lambda: overlay.entry.config(state='normal'))

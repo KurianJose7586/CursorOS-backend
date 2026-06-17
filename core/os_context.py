@@ -55,3 +55,27 @@ def get_directory_contents(path: str):
         # Return what we have or raise? Strategy says handle gracefully.
     
     return items, truncated
+
+def read_file_content(path: str, max_chars: int = 2000):
+    """Reads the beginning of a file if it's a text-based format."""
+    text_extensions = {'.txt', '.md', '.py', '.js', '.json', '.html', '.css', '.csv', '.log', '.xml', '.yaml', '.yml'}
+    
+    if not os.path.exists(path):
+        return None, "File not found."
+    
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in text_extensions:
+        return None, f"Unsupported file type for peeking: {ext}"
+    
+    try:
+        # Try UTF-8 first, then latin-1 as fallback
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read(max_chars)
+        except UnicodeDecodeError:
+            with open(path, 'r', encoding='latin-1') as f:
+                content = f.read(max_chars)
+        
+        return content, None
+    except Exception as e:
+        return None, f"Error reading file: {str(e)}"

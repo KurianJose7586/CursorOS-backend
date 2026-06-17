@@ -84,6 +84,8 @@ class FindFileTask:
     def _retrieve_windows_index(self, keywords, extensions) -> list:
         paths = []
         pythoncom.CoInitialize()
+        conn = None
+        rs = None
         try:
             conn = win32com.client.Dispatch("ADODB.Connection")
             rs = win32com.client.Dispatch("ADODB.Recordset")
@@ -91,14 +93,16 @@ class FindFileTask:
             
             user_root = os.path.expanduser("~").replace("\\", "/")
             
-            # If we have keywords, use them in WHERE. If not, rely on extensions/recency
             where_parts = []
             if keywords:
-                kw_stmt = " AND ".join([f"System.ItemName LIKE '%{kw}%'" for kw in keywords])
+                # Sanitize keywords for SQL
+                safe_keywords = [kw.replace("'", "''") for kw in keywords]
+                kw_stmt = " OR ".join([f"System.ItemName LIKE '%{kw}%'" for kw in safe_keywords])
                 where_parts.append(f"({kw_stmt})")
             
             if extensions:
-                ext_stmt = " OR ".join([f"System.FileExtension = '{e}'" for e in extensions])
+                safe_extensions = [e.replace("'", "''") for e in extensions]
+                ext_stmt = " OR ".join([f"System.FileExtension = '{e}'" for e in safe_extensions])
                 where_parts.append(f"({ext_stmt})")
                 
             if not where_parts:
@@ -113,9 +117,15 @@ class FindFileTask:
                 path = rs.Fields.Item("System.ItemPathDisplay").Value
                 if path: paths.append(path)
                 rs.MoveNext()
-            rs.Close()
-            conn.Close()
+        except Exception as e:
+            print(f"DEBUG: Windows Index Retrieval failed: {e}")
         finally:
+            if rs:
+                try: rs.Close()
+                except: pass
+            if conn:
+                try: conn.Close()
+                except: pass
             pythoncom.CoUninitialize()
         return paths
 
